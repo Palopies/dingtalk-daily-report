@@ -59,8 +59,9 @@ metadata:
      "default_profile": "daily",
      "content_type": "markdown", "item_type": "1", "to_chat": false,
      "timezone": "Asia/Shanghai",
-     "schedule": {"enabled": true, "cron": "15 18 * * *", "profile": "daily",
-                  "durable": true, "prompt": "按 dingtalk-daily-report skill 写今天的日报并提交（用 profile=daily）"},
+     "schedule": {"enabled": false, "cron": "15 18 * * *", "profile": "daily",
+                  "timezone": "Asia/Shanghai", "durable": true, "attendance_gate": "on-duty",
+                  "prompt": "按 dingtalk-daily-report skill 写今日日报并提交（profile=daily；提交前先跑 attendance_gate.py，should_write=false 就跳过）"},
      "profiles": [
        {
          "key": "daily", "name": "日报",
@@ -92,16 +93,33 @@ metadata:
 5. **确认闸门**（`confirm_before_submit:true`）：明确问"确认提交这份<日志类型>给这 N 个人吗？"；用户同意后才跑 `... --profile <key> --confirmed` 真提交。改动内容/接收人后必须重新 dry-run + 确认。
 6. **回执**：返回 `ok:true`、`report_id`、`verified`、`url` 后把钉钉链接给用户；`verified:false` 则提示去钉钉核对。
 
-## 定时任务（每天自动写）
+## 定时任务（先问清楚，再配置）
 
-> 用 CodeBuddy 的 `CronCreate` 工具（调度提示词，在本会话触发）。**会话级任务：Agent 不在线 / 会话结束，任务就不会触发——正好符合"不在线就不写"**。循环任务默认 3 天后自动过期。
+> 核心原则：**默认不开定时任务**；只要用户要开，必须先逐项问清并确认，再写 `schedule` 配置 + 建 cron。**宁可不写，也绝不瞎写。**
+> 用 `CronCreate`（会话级任务：Agent 不在线/会话结束就不触发；循环任务 3 天自动过期）。不要写成 hook。
 
-1. 配置 `schedule` 块（见上）：`enabled`、`cron`（5 段本地时间，6:15 = `15 18 * * *`）、`profile`、`durable`（建议 true，写盘跨重启仍在本会话触发）、`prompt`。
-2. 用户要求"每天定时写日志"时：
-   - 确认 `schedule.enabled`；未配置则先问时间+写哪种并写入。
-   - 调 `CronCreate`：`cron` 取 `schedule.cron`；`prompt` 取 `schedule.prompt`（明确写清"按本 skill 写今日<类型>并提交，profile=<key>"）；`recurring:true`；`durable` 取 `schedule.durable`。
-   - **告知用户**：任务 ID、每天触发时间、以及"仅在本 Agent 会话在线时触发；循环任务 3 天自动过期，需续期可重新设置"。
-3. 用 `CronList` 查看、需要时取消后重建。不要把定时写成 hook。
+### 设置流程（触发词：设置定时日报 / 每天定时写 / 取消定时）
+
+用户要求开定时任务时，**先问、确认、再配置**：
+
+1. **问时间**：每天几点？（如 18:15 → `cron` = `15 18 * * *`，本地时区）。问是否只工作日（cron 加 `1-5`；但注意调休，推荐保留每天 + 考勤门禁兜底）。
+2. **问写哪种日志**：多 profile 时用 `report_profile.py list` 列候选让用户选（复用路由）。
+3. **问考勤门禁**（三档，把含义讲清楚）：
+   - `off` 不检查 —— 周末/请假也照写（用户明确要才用）。
+   - `on-duty`（默认）—— **有上班打卡才写**；周末/请假/未打卡自动跳过。涵盖大部分情况。
+   - `approved`（严格）—— 有上班打卡**或**当天有出差/外出审批单才算上班；纯请假/无记录跳过。
+4. **问是否跨重启保留**：`durable`（建议 true）。
+5. **汇总确认**：把时间、日志类型、门禁档位、durable 写成一段话给用户，**明确确认后**才写 `schedule` 配置并调 `CronCreate`。
+   - `CronCreate` 参数：`cron`=配置值；`prompt`=明确写"按 dingtalk-daily-report skill 写今日<类型>并提交（profile=<key>；提交前必须先跑 attendance_gate.py 判断今天该不该写，should_write=false 就跳过）"；`recurring:true`；`durable`=配置值。
+   - 告知用户：任务 ID、触发时间、"仅本 Agent 会话在线时触发"、3 天过期需续期。
+6. **取消**：`CronList` 查 → 问用户确认 → 删除任务 → 配置 `schedule.enabled=false`。
+
+### 定时触发时（cron 的 prompt 引导）
+
+1. **先跑门禁**：`python3 scripts/attendance_gate.py --date <今天>`。
+2. `should_write:false` → **不写日报**，在会话里说明原因（如"今天无上班打卡，已跳过日报"），结束。**不要试图绕过门禁硬写。**
+3. `should_write:true` → 走正常日常流程（路由 → 提炼 → dry-run → 确认/提交）。
+4. 任何异常、查询失败 → **fail-closed 跳过**并告知（脚本已内置 fail-closed）。
 
 ## 规则 / 禁止
 
@@ -111,6 +129,7 @@ metadata:
 - **不走原生 `dws report entry submit`**，一律 `report_submit.py`。
 - `--contents-file` 只用 cwd 相对路径（脚本已处理），不改成 `/tmp/...`。
 - **dry-run 不是提交**；没明确确认不得加 `--confirmed`。
+- **定时任务默认关闭**；开启必须逐项问清并确认；**默认带考勤门禁**；**宁可不写，不瞎写**，判断不了就跳过。
 - 字段漂移 → 停下让用户重跑首次设置；`--to-user-ids` 非空。
 - 同事复用：整包 clone 到 `~/.agents/skills/` 并软链到 `~/.codebuddy/skills/`，首次说"写日志"自动走设置；不用改代码。
 

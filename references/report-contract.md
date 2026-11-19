@@ -92,12 +92,34 @@ python3 scripts/report_profile.py select --key weekly
 
 **绝不猜**：`needs_selection` 时按 `prompt`/`candidates` 问用户，选定后用 `--key` 重跑。提交一律 `report_submit.py --profile <key>`。
 
-## 7. 定时任务（CronCreate）
+## 7. 定时任务 + 考勤门禁
 
-配置 `schedule` 块：`{"enabled":true,"cron":"15 18 * * *","profile":"daily","durable":true,"prompt":"..."}`。
+配置 `schedule` 块（默认 `enabled:false`，开启需先问清并确认）：
+```json
+{"enabled":true,"cron":"15 18 * * *","profile":"daily","timezone":"Asia/Shanghai",
+ "durable":true,"attendance_gate":"on-duty","prompt":"..."}
+```
 - cron 是 5 段**本地时间**；6:15 = `15 18 * * *`。
-- `CronCreate` 是**会话级**：Agent 不在线/会话结束即不触发（符合"不在线就不写"）；`durable:true` 写盘跨重启仍在本会话触发。
-- 循环任务默认 **3 天自动过期**，需告知用户并可续期。用 `CronList` 查看/取消。
+- `CronCreate` 是**会话级**：Agent 不在线/会话结束即不触发；`durable:true` 写盘跨重启仍在本会话触发；循环任务 **3 天自动过期**，用 `CronList` 查看/取消。
+- 触发时**先跑门禁脚本**再决定是否写；判断不了就跳过（fail-closed，"宁可不写不瞎写"）。
+
+考勤查询命令（只读）：
+```bash
+# 当天打卡结果（含 checkType=OnDuty/OffDuty、timeResult、workDate）
+dws attendance +check-result --users <uid> --start YYYY-MM-DD --end YYYY-MM-DD -f json
+# 出差/外出审批（approved 档用）
+dws attendance +list-approve --users <uid> --types trip --start YYYY-MM-DD --end YYYY-MM-DD -f json
+# 当前用户打卡流水（自动解析 userId，备选）
+dws attendance +my-attendance -f json
+```
+门禁档位 `schedule.attendance_gate`：`off`（不检查）| `on-duty`（有上班打卡才写，默认）| `approved`（打卡或出差审批才算上班）。
+
+门禁脚本：`python3 scripts/attendance_gate.py --date YYYY-MM-DD`。输出：
+```json
+{"ok":true,"should_write":true,"gate":"on-duty","reason":"今日有上班打卡，写日报",
+ "date":"2026-11-19","user_id":"...","attendance_summary":{"on_duty":true,"check_count":1}}
+```
+`should_write:false` 即跳过且不提交；查询失败也是 `should_write:false`（fail-closed），exit 0。
 
 ## 8. 错误恢复
 
@@ -108,6 +130,8 @@ python3 scripts/report_profile.py select --key weekly
 | `confirmation_required` | 真提交无 `--confirmed` | 展示 dry-run 预览 → 用户确认 → 加 `--confirmed` 重跑 |
 | `profile_needs_selection` | 多类型意图不清 | 按 payload.prompt/candidates 问用户，选定后 `--key` 重跑 |
 | `profile_not_found` | `--key` 不存在 | 用 `report_profile.py list` 查合法 key |
+| `user_id_unresolved` | 解析不出当前用户 | `dws auth status` 查登录态；定时场景 fail-closed 跳过 |
+| `should_write=false` | 门禁判定不该写 | 不提交，按 reason 告知用户（周末/请假/查询失败） |
 | `dws_bad_output` / `dws_errcode` | dws 报错 | 看 payload.error / errcode，查 `dws auth status` 登录态，必要时 `dws auth login` |
 | `template_no_fields` | 模板无字段 | 确认模板名精确、当前用户可用该模板 |
 

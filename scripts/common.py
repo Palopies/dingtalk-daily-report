@@ -31,6 +31,18 @@ CONTENT_DEFAULTS: Dict[str, Any] = {
     "custom_instruction": "",      # per-person extra instruction for summarisation
 }
 
+# Scheduled daily-report defaults. Scheduling is OFF unless the user opts in.
+SCHEDULE_DEFAULTS: Dict[str, Any] = {
+    "enabled": False,
+    "cron": "",
+    "profile": None,
+    "timezone": "Asia/Shanghai",
+    "durable": True,
+    "attendance_gate": "on-duty",  # off | on-duty | approved
+    "prompt": "",
+}
+VALID_GATES = ("off", "on-duty", "approved")
+
 
 class ReportError(Exception):
     """Structured, user-facing error. Carries an optional payload."""
@@ -227,6 +239,17 @@ def get_profiles(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def migrated_from_v1(cfg: Dict[str, Any]) -> bool:
     return not (int(cfg.get("version", 1)) >= 2 and isinstance(cfg.get("profiles"), list))
+
+
+def get_schedule(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return effective schedule view with defaults merged. Scheduling off by default."""
+    merged = dict(SCHEDULE_DEFAULTS)
+    user = cfg.get("schedule")
+    if isinstance(user, dict):
+        merged.update({k: v for k, v in user.items() if k in SCHEDULE_DEFAULTS})
+    if merged["attendance_gate"] not in VALID_GATES:
+        merged["attendance_gate"] = "on-duty"  # fail-safe default
+    return merged
 
 
 def get_profile(cfg: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
